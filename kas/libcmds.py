@@ -31,6 +31,7 @@ import pprint
 import configparser
 import json
 import base64
+import copy
 from pathlib import Path
 from git.config import GitConfigParser
 from .libkas import (ssh_cleanup_agent, ssh_setup_agent, ssh_no_host_key_check,
@@ -77,14 +78,7 @@ class Macro:
 
             self.setup_commands += [(x, None) for x in [
                 SetupHome(),
-                InitSetupRepos(),
-                repo_loop,
-                FinishSetupRepos(),
-                ReposCheckout(),
-                ReposCheckSignatures(),
-                ReposApplyPatches(),
-                SetupEnviron(),
-                WriteBBConfig(),
+                ConditionalSetupLoop(),
             ]]
         else:
             self.setup_commands = []
@@ -102,6 +96,9 @@ class Macro:
             Runs a command from the command list with respect to the
             configuration.
         """
+        # Store skip parameter in context so commands can access it
+        ctx.skip = skip or []
+
         def _run_single(command):
             command_name = str(command)
             if command_name in (skip or []):
@@ -652,3 +649,228 @@ class ReposCheckSignatures(Command):
 
             raise RepoRefError(f'Repository {repo.name} is not signed '
                                'with a trusted key.')
+
+
+class ConditionalSetupLoop(Command):
+    """
+        A loop that combines repo setup through config writing with conditional
+        include evaluation. This loop continues until no new conditional
+        includes are triggered or the maximum number of iterations is reached.
+    """
+
+    def __init__(self):
+        self.max_iterations = None
+
+    def __str__(self):
+        return 'conditional_setup_loop'
+
+    def execute(self, ctx):
+        # Get max iterations from command line args
+        self.max_iterations = getattr(ctx.args, 'max_iterations', 10)
+
+        # Check if there are any conditional includes to process
+        has_conditional_includes = bool(ctx.config.handler.get_conditional_definitions())
+
+        iteration = 0
+
+        while iteration < self.max_iterations:
+            iteration += 1
+            logging.debug('ConditionalSetupLoop: iteration %d', iteration)
+
+            # Run the repo setup and config writing sequence
+            self._run_setup_sequence(ctx)
+
+            # Capture configuration state after setup (for next iteration comparison)
+            try:
+                config_after_setup = copy.deepcopy(ctx.config.get_config())
+            except RuntimeError:
+                # Config not available yet, treat as changed
+                config_after_setup = None
+
+            # Evaluate conditional includes after config is written
+            conditional_includes_processed = self._evaluate_conditional_includes(ctx)
+
+            # Process any new conditional includes for next iteration
+            self._reset_for_next_iteration(ctx)
+
+            # Check if configuration changed by comparing with previous iteration
+            config_changed = (not hasattr(self, '_prev_config') or
+                            self._prev_config != config_after_setup)
+
+            # Store current config for next iteration comparison
+            self._prev_config = config_after_setup
+
+            # For the first iteration with conditional includes, always continue
+            # to allow variable changes from regular includes to take effect
+            if iteration == 1 and has_conditional_includes:
+                continue
+
+            # For subsequent iterations, continue if ANY changes occurred
+            if not config_changed and not conditional_includes_processed:
+                # No configuration changes or conditional includes processed
+                break
+
+            if config_changed:
+                logging.debug('ConditionalSetupLoop: configuration changed, '
+                            'continuing iteration')
+            if conditional_includes_processed:
+                logging.debug('ConditionalSetupLoop: conditional includes '
+                            'processed, continuing iteration')
+
+        if iteration >= self.max_iterations:
+            raise IncludeException(
+                f'ConditionalSetupLoop: failed to converge after '
+                f'{self.max_iterations} iterations. Possible circular '
+                f'dependencies in conditional includes. You can increase '
+                f'the maximum iterations by setting the environment '
+                f'variable: KAS_CONDITIONAL_INCLUDES_MAX_ITERATIONS='
+                f'{self.max_iterations * 2}')
+
+    def _run_setup_sequence(self, ctx):
+        """
+        Run the standard repo setup and config writing sequence.
+        Respects the skip parameter for --keep-config-unchanged functionality.
+        """
+        def _run_single(command):
+            command_name = str(command)
+            skip_list = getattr(ctx, 'skip', [])
+            if command_name in skip_list:
+                logging.debug('ConditionalSetupLoop: skipping %s (keep-config-unchanged)', command_name)
+                return False
+            logging.debug('ConditionalSetupLoop: executing %s', command_name)
+            command.execute(ctx)
+            return True
+
+        repo_loop = Loop('repo_setup_loop')
+        repo_loop.add(SetupReposStep())
+
+        commands = [
+            InitSetupRepos(),
+            repo_loop,
+            FinishSetupRepos(),
+            ReposCheckout(),
+            ReposCheckSignatures(),
+            ReposApplyPatches(),
+            SetupEnviron(),
+            WriteBBConfig(),
+        ]
+
+        for cmd in commands:
+            _run_single(cmd)
+
+    def _evaluate_conditional_includes(self, ctx):
+        """
+        Evaluate conditional includes using the IncludeHandler integration.
+
+        This method processes all conditional includes defined in the
+        configuration and determines which ones should be included based
+        on their conditions.
+
+        This method is called AFTER the complete setup sequence
+        (_run_setup_sequence), which ensures that:
+        1. All repos are cloned and checked out to their proper refs
+        2. BitBake configuration files are written (bblayers.conf, local.conf)
+        3. Environment is properly set up
+        
+        This guarantees that bitbake-getvar calls will operate on the correct
+        repository states and have access to the proper BitBake configuration.
+
+        Args:
+            ctx: The kas context containing configuration and environment
+
+        Returns:
+            bool: True if new conditional includes were processed, False otherwise
+
+        Raises:
+            IncludeException: If there are errors in conditional evaluation
+        """
+        try:
+            # Use the integrated conditional processing in IncludeHandler
+            includes_to_process = ctx.config.handler.process_conditional_includes()
+
+            if not includes_to_process:
+                return False
+
+            logging.debug('ConditionalSetupLoop: processing %d conditional '
+                        'includes', len(includes_to_process))
+
+            new_includes_added = False
+
+            for cond_include in includes_to_process:
+                if self._process_conditional_include(ctx, cond_include):
+                    new_includes_added = True
+
+            return new_includes_added
+
+        except Exception as e:
+            logging.warning('ConditionalSetupLoop: error evaluating '
+                          'conditional includes: %s', e)
+            return False
+
+    def _process_conditional_include(self, ctx, cond_include):
+        """
+        Process a single conditional include by adding it to the config.
+
+        Args:
+            ctx: The kas context containing configuration and environment
+            cond_include: Dictionary containing conditional include information
+
+        Returns:
+            bool: True if the include was successfully processed, False otherwise
+        """
+        try:
+            include_def = cond_include['include']
+            repo_path = cond_include['repo_path']
+
+            # Get file path
+            if 'repo' in include_def:
+                # Include from another repo
+                repo_name = include_def['repo']
+                file_path = include_def['file']
+
+                # Check if repo is available
+                repos = {name: repo.path for name, repo
+                        in ctx.config.repo_dict.items()}
+                if repo_name not in repos:
+                    logging.warning('ConditionalSetupLoop: repo %s not '
+                                  'available for conditional include', repo_name)
+                    return False
+
+                full_path = os.path.join(repos[repo_name], file_path)
+            else:
+                # Local include
+                file_path = include_def['file']
+                full_path = os.path.abspath(os.path.join(repo_path, file_path))
+
+            if not os.path.exists(full_path):
+                logging.warning('ConditionalSetupLoop: conditional include '
+                              'file does not exist: %s', full_path)
+                return False
+
+            # Register conditional include for processing
+            logging.info('ConditionalSetupLoop: adding conditional include: %s',
+                        file_path)
+            ctx.config.handler.commit_conditional_include(full_path)
+            return True
+
+        except KeyError as e:
+            logging.error('ConditionalSetupLoop: missing required field in '
+                        'conditional include: %s', e)
+            return False
+        except Exception as e:
+            logging.error('ConditionalSetupLoop: error processing conditional '
+                        'include: %s', e)
+            return False
+
+    def _reset_for_next_iteration(self, ctx):
+        """
+        Reset state for the next iteration of the conditional setup loop.
+        """
+        # Reset context state
+        ctx.reset_conditional_state()
+
+        # Process resolved includes
+        ctx.config.handler.process_resolved_includes()
+
+        # Clear variable cache for next iteration
+        ctx.config.handler.clear_variable_cache()

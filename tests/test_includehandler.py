@@ -473,3 +473,260 @@ v: {v3: z, v4: z}''')}
             assert index['v2'] < index['v1']
             assert index['v3'] < index['v1']
             assert index['v5'] < index['v1']
+
+
+def test_conditional_expression_parser_env_variable(monkeypatch):
+    """
+    Test ConditionalExpressionParser with environment variables.
+    """
+    from kas.includehandler import ConditionalExpressionParser, VariableResolver
+    
+    monkeypatch.setenv('TEST_VAR', 'test_value')
+    monkeypatch.setenv('TEST_LIST', 'debug-tweaks read-only-rootfs')
+    
+    parser = ConditionalExpressionParser()
+    variable_getter = VariableResolver()
+    
+    # Test equality conditions
+    condition1 = parser.parse_condition('env[TEST_VAR] equals test_value')
+    assert parser.evaluate_condition(condition1, variable_getter.get_variable) == True
+    
+    condition2 = parser.parse_condition('env[TEST_VAR] is test_value')
+    assert parser.evaluate_condition(condition2, variable_getter.get_variable) == True
+    
+    condition3 = parser.parse_condition('env[TEST_VAR] equals different')
+    assert parser.evaluate_condition(condition3, variable_getter.get_variable) == False
+    
+    # Test contains operator (space-separated lists)
+    condition4 = parser.parse_condition('env[TEST_LIST] contains debug-tweaks')
+    assert parser.evaluate_condition(condition4, variable_getter.get_variable) == True
+    
+    condition5 = parser.parse_condition('env[TEST_LIST] contains missing-feature')
+    assert parser.evaluate_condition(condition5, variable_getter.get_variable) == False
+    
+    condition6 = parser.parse_condition('env[MISSING_VAR] equals something')
+    assert parser.evaluate_condition(condition6, variable_getter.get_variable) == False
+
+
+def test_conditional_expression_parser_bitbake_variable_mock():
+    """
+    Test ConditionalExpressionParser with mocked BitBake variables.
+    """
+    from kas.includehandler import ConditionalExpressionParser, VariableResolver
+    from unittest.mock import Mock
+    
+    parser = ConditionalExpressionParser()
+    
+    # Create a mock variable getter that simulates BitBake variables
+    mock_variable_getter = Mock()
+    
+    def mock_get_variable(source, name):
+        mock_bitbake_vars = {
+            'MACHINE': 'qemux86-64',
+            'DISTRO': 'poky',
+            'IMAGE_FEATURES': 'debug-tweaks read-only-rootfs package-management',
+            'EMPTY_VAR': ''
+        }
+        
+        if source == 'bb':
+            return mock_bitbake_vars.get(name, '')
+        elif source == 'env':
+            return os.environ.get(name, '')
+        return ''
+    
+    mock_variable_getter.side_effect = mock_get_variable
+    
+    # Test equality conditions with BitBake variables
+    condition1 = parser.parse_condition('bb[MACHINE] equals qemux86-64')
+    assert parser.evaluate_condition(condition1, mock_variable_getter) == True
+    
+    condition2 = parser.parse_condition('bb[MACHINE] is qemux86-64')
+    assert parser.evaluate_condition(condition2, mock_variable_getter) == True
+    
+    condition3 = parser.parse_condition('bb[DISTRO] equals poky')
+    assert parser.evaluate_condition(condition3, mock_variable_getter) == True
+    
+    condition4 = parser.parse_condition('bb[MACHINE] equals different-machine')
+    assert parser.evaluate_condition(condition4, mock_variable_getter) == False
+    
+    # Test contains operator with BitBake variables (space-separated lists)
+    condition5 = parser.parse_condition('bb[IMAGE_FEATURES] contains debug-tweaks')
+    assert parser.evaluate_condition(condition5, mock_variable_getter) == True
+    
+    condition6 = parser.parse_condition('bb[IMAGE_FEATURES] contains package-management')
+    assert parser.evaluate_condition(condition6, mock_variable_getter) == True
+    
+    condition7 = parser.parse_condition('bb[IMAGE_FEATURES] contains missing-feature')
+    assert parser.evaluate_condition(condition7, mock_variable_getter) == False
+    
+    # Test with empty BitBake variable
+    condition8 = parser.parse_condition('bb[EMPTY_VAR] equals empty_string')
+    assert parser.evaluate_condition(condition8, mock_variable_getter) == False
+    
+    condition9 = parser.parse_condition('bb[EMPTY_VAR] equals something')
+    assert parser.evaluate_condition(condition9, mock_variable_getter) == False
+    
+    # Verify the mock was called correctly
+    mock_variable_getter.assert_called()
+    # Check that bb[MACHINE] was requested
+    mock_variable_getter.assert_any_call('bb', 'MACHINE')
+
+
+def test_conditional_expression_parser_mixed_sources(monkeypatch):
+    """
+    Test ConditionalExpressionParser with both environment and mocked BitBake variables.
+    This test provides comprehensive coverage of mixed variable source conditions.
+    """
+    from kas.includehandler import ConditionalExpressionParser
+    from unittest.mock import Mock
+    
+    # Set up environment variables for testing
+    monkeypatch.setenv('BUILD_TYPE', 'debug')
+    monkeypatch.setenv('ENABLE_FEATURE', 'yes')
+    
+    parser = ConditionalExpressionParser()
+    
+    # Create a mock function that handles both env and bb variables
+    def mock_get_variable(source, name):
+        if source == 'env':
+            return os.environ.get(name, '')
+        elif source == 'bb':
+            mock_bb_vars = {
+                'MACHINE': 'qemux86-64',
+                'TARGET_ARCH': 'x86_64',
+                'PREFERRED_FEATURES': 'feature1 feature2 debug-info'
+            }
+            return mock_bb_vars.get(name, '')
+        return ''
+    
+    # Test mixed conditions
+    condition1 = parser.parse_condition('env[BUILD_TYPE] equals debug')
+    assert parser.evaluate_condition(condition1, mock_get_variable) == True
+    
+    condition2 = parser.parse_condition('bb[MACHINE] contains qemu')
+    assert parser.evaluate_condition(condition2, mock_get_variable) == False  # qemu is not in "qemux86-64" as a separate word
+    
+    condition3 = parser.parse_condition('bb[MACHINE] equals qemux86-64')
+    assert parser.evaluate_condition(condition3, mock_get_variable) == True
+    
+    condition4 = parser.parse_condition('bb[PREFERRED_FEATURES] contains debug-info')
+    assert parser.evaluate_condition(condition4, mock_get_variable) == True
+    
+    condition5 = parser.parse_condition('env[ENABLE_FEATURE] is yes')
+    assert parser.evaluate_condition(condition5, mock_get_variable) == True
+    
+    # Test some false conditions
+    condition6 = parser.parse_condition('env[BUILD_TYPE] equals production')
+    assert parser.evaluate_condition(condition6, mock_get_variable) == False
+    
+    condition7 = parser.parse_condition('bb[TARGET_ARCH] equals arm')
+    assert parser.evaluate_condition(condition7, mock_get_variable) == False
+
+
+def test_variable_resolver_no_target_warning():
+    """
+    Test that VariableResolver emits warning when no target is configured.
+    """
+    from kas.includehandler import VariableResolver
+    from unittest.mock import Mock, patch
+    import logging
+    
+    # Mock the context to have no targets configured
+    mock_ctx = Mock()
+    mock_config = Mock()
+    mock_config.get_bitbake_targets.return_value = []  # No targets
+    mock_ctx.config = mock_config
+    
+    variable_getter = VariableResolver()
+    
+    with patch('kas.context.get_context', return_value=mock_ctx):
+        with patch('kas.includehandler.logging') as mock_logging:
+            target_recipe = variable_getter._get_target_recipe()
+            
+            # Verify that target_recipe is None (no target configured)
+            assert target_recipe is None
+            
+            # Verify that a warning was logged
+            mock_logging.warning.assert_called_once()
+            warning_call = mock_logging.warning.call_args[0][0]
+            assert 'No targets configured' in warning_call
+
+
+def test_conditional_expression_parser_inclusion():
+    """Test inclusion parsing with flexible operands."""
+    from kas.includehandler import ConditionalExpressionParser
+    
+    parser = ConditionalExpressionParser()
+
+    # Mock variable getter for testing
+    def mock_getter(source, name):
+        variables = {
+            'bb': {
+                'MACHINE': 'qemux86-64',
+                'BUILD_TARGETS': 'beaglebone qemuarm',
+                'IMAGE_FEATURES': 'debug-tweaks ssh-server-dropbear'
+            },
+            'env': {
+                'TARGET_LIST': 'beaglebone qemux86-64 rpi4',
+                'CURRENT_MACHINE': 'qemux86-64'
+            }
+        }
+        return variables.get(source, {}).get(name, '')
+
+    # Test variable in list literal
+    condition = parser.parse_condition('bb[MACHINE] in [qemux86-64, rpi4]')
+    assert condition['type'] == 'inclusion'
+    assert condition['container']['type'] == 'list'
+    assert condition['container']['values'] == ['qemux86-64', 'rpi4']
+    assert condition['value']['type'] == 'variable'
+    assert condition['value']['source'] == 'bb'
+    assert condition['value']['name'] == 'MACHINE'
+    assert parser.evaluate_condition(condition, mock_getter) is True
+
+    # Test variable in variable
+    condition = parser.parse_condition('bb[MACHINE] in env[TARGET_LIST]')
+    assert condition['type'] == 'inclusion'
+    assert condition['container']['type'] == 'variable'
+    assert condition['container']['source'] == 'env'
+    assert condition['container']['name'] == 'TARGET_LIST'
+    assert condition['value']['type'] == 'variable'
+    assert condition['value']['source'] == 'bb'
+    assert condition['value']['name'] == 'MACHINE'
+    assert parser.evaluate_condition(condition, mock_getter) is True
+
+    # Test list literal contains variable
+    condition = parser.parse_condition('[qemux86-64, rpi4] contains bb[MACHINE]')
+    assert condition['type'] == 'inclusion'
+    assert condition['container']['type'] == 'list'
+    assert condition['container']['values'] == ['qemux86-64', 'rpi4']
+    assert condition['value']['type'] == 'variable'
+    assert condition['value']['source'] == 'bb'
+    assert condition['value']['name'] == 'MACHINE'
+    assert parser.evaluate_condition(condition, mock_getter) is True
+
+    # Test no match cases
+    condition = parser.parse_condition('bb[MACHINE] in [beaglebone, rpi4]')
+    assert parser.evaluate_condition(condition, mock_getter) is False
+
+    condition = parser.parse_condition('bb[MACHINE] in bb[BUILD_TARGETS]')
+    assert parser.evaluate_condition(condition, mock_getter) is False
+
+
+def test_conditional_expression_parser_invalid_syntax():
+    """Test that inclusion parsing properly handles invalid syntax."""
+    from kas.includehandler import ConditionalExpressionParser, IncludeException
+    
+    parser = ConditionalExpressionParser()
+
+    # Test invalid container expression
+    with pytest.raises(IncludeException, match='Container expression.*must be a variable.*or a list literal'):
+        parser.parse_condition('bb[MACHINE] in invalid_syntax')
+
+    # Test empty list
+    condition = parser.parse_condition('bb[MACHINE] in []')
+    assert condition['container']['type'] == 'list'
+    assert condition['container']['values'] == []
+
+    # Test list with whitespace
+    condition = parser.parse_condition('bb[MACHINE] in [  val1  ,  val2  ]')
+    assert condition['container']['values'] == ['val1', 'val2']

@@ -163,6 +163,11 @@ def kas_get_argparser():
                         default=f'{DEFAULT_LOG_LEVEL}',
                         help=f'Set log level (default: {DEFAULT_LOG_LEVEL})')
 
+    parser.add_argument('--max-iterations',
+                        type=int,
+                        default=10,
+                        help='Maximum number of conditional processing iterations (default: 10)')
+
     subparser = parser.add_subparsers(help='sub command help', dest='cmd')
 
     for plugin in plugins.all():

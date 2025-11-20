@@ -101,6 +101,11 @@ class Context:
         self.config = None
         self.args = args
 
+        # Initialize conditional include state
+        self.missing_repo_names = None
+        self.missing_repo_names_old = None
+        self.missing_repos = None
+
     def setup_initial_environ(self):
         """
             Sets the environment variables for processes that are
@@ -192,3 +197,12 @@ class Context:
     @property
     def managed_env(self):
         return self._get_managed_env()
+
+    def reset_conditional_state(self):
+        """
+            Reset state for conditional include processing.
+            This is called between iterations to ensure clean state.
+        """
+        self.missing_repo_names = None
+        self.missing_repo_names_old = None
+        self.missing_repos = None
