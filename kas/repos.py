@@ -109,6 +109,8 @@ class Repo:
         self._patches = patches
         self.allowed_signers = signers
         self.operations_disabled = disable_operations
+        self.is_fetching = False
+        self.is_setup_complete = False
 
         if not self.url:
             self.resolve_local()
@@ -370,8 +372,10 @@ class RepoImpl(Repo):
             Starts asynchronous repository fetch.
         """
 
-        if self.operations_disabled:
+        if self.operations_disabled or self.is_fetching:
             return
+
+        self.is_fetching = True
 
         refdir = get_context().kas_repo_ref_dir
         sdir = os.path.join(refdir, self.qualified_name) if refdir else None
@@ -444,6 +448,7 @@ class RepoImpl(Repo):
         (retc, output) = await run_cmd_async(self.fetch_cmd(),
                                              cwd=self.path,
                                              fail=False)
+
         if retc:
             logging.error('Could not update repository %s: %s',
                           self.name, output)
@@ -457,7 +462,8 @@ class RepoImpl(Repo):
         """
         if self.operations_disabled \
             or (self.commit is None and self.tag is None
-                and self.branch is None and self.refspec is None):
+                and self.branch is None and self.refspec is None) \
+            or self.is_setup_complete:
             return
 
         if not get_context().force_checkout:
@@ -518,6 +524,9 @@ class RepoImpl(Repo):
 
         run_cmd(self.checkout_cmd(desired_ref, is_branch), cwd=self.path)
         logging.info(f'Repository {self.name} checked out to {desired_ref}')
+
+        # Mark this repo as completely set-up to avoid re-processing
+        self.is_setup_complete = True
 
     async def apply_patches_async(self):
         """

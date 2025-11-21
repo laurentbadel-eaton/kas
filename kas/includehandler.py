@@ -338,6 +338,9 @@ class IncludeHandler:
         self.conditional_processor = ConditionalIncludeProcessor()
         self.resolved_includes = []
 
+        # Cache for validation between conditional setup iterations
+        self.cached_config = None
+
     def get_lock_filename(self, kasfile=None):
         """
         Returns the lockfile name for the given kas config file.
@@ -568,6 +571,10 @@ class IncludeHandler:
 
         config = functools.reduce(_internal_dict_merge,
                                   map(lambda x: x.config, config_files))
+
+        # Validate new includes against cached config
+        self._validate_config_changes(config)
+
         # the merged config must have the highest (used) version number
         header_version = max([int(cfg.config['header']['version'])
                               for cfg in config_files])
@@ -639,6 +646,97 @@ class IncludeHandler:
 
         return True
 
+    def _validate_config_changes(self, config):
+        """
+        Validate the current config against the cached config from previous iteration.
+        This ensures conditional includes only add new repos/keys/layers.
+
+        Args:
+            config: The current merged configuration dict
+
+        Raises:
+            IncludeException: If conditional includes modify existing configurations
+        """
+        if self.cached_config is None:
+            # First iteration - no validation needed
+            return
+
+        cached_repos = self.cached_config.get('repos', {})
+        current_repos = config.get('repos', {})
+
+        cached_target = self.cached_config.get('target')
+        current_target = config.get('target')
+
+        # Validate target hasn't changed
+        if cached_target != current_target:
+            raise IncludeException(
+                f'Conditional includes cannot modify the target configuration. '
+                f'Previous target: "{cached_target}", current target: "{current_target}". '
+                f'Changing targets mid-processing is disallowed as it would '
+                f'affect variable resolution and build consistency.'
+            )
+
+        # Validate repo changes - only additions allowed
+        for repo_name, current_repo_config in current_repos.items():
+            if repo_name not in cached_repos:
+                # New repo added - always allowed
+                continue
+
+            cached_repo_config = cached_repos[repo_name]
+            self._validate_repo_changes(repo_name, cached_repo_config, current_repo_config)
+
+    def _validate_repo_changes(self, repo_name, cached_config, current_config):
+        """
+        Validate that no disallowed repo configuration changes have occurred.
+
+        Args:
+            repo_name: Name of the repository
+            cached_config: Previous repo configuration
+            current_config: Current repo configuration
+        """
+        for key, current_value in current_config.items():
+            if key not in cached_config:
+                # New key added - always allowed
+                continue
+
+            cached_value = cached_config[key]
+
+            if key == 'layers':
+                # Special handling for layers - allow adding new layers only
+                if isinstance(cached_value, dict) and isinstance(current_value, dict):
+                    # Check existing layers haven't changed
+                    for layer_name, layer_config in cached_value.items():
+                        if layer_name in current_value and current_value[layer_name] != layer_config:
+                            raise IncludeException(
+                                f'Conditional include cannot modify existing layer '
+                                f'"{layer_name}" in repository "{repo_name}". '
+                            )
+                else:
+                    # Non-dict layers must match exactly
+                    if cached_value != current_value:
+                        raise IncludeException(
+                            f'Conditional include cannot modify layers configuration '
+                            f'in repository "{repo_name}". '
+                        )
+            else:
+                # For all other keys, no modification allowed
+                if cached_value != current_value:
+                    raise IncludeException(
+                        f'Conditional include cannot modify existing repo '
+                        f'configuration "{key}" in repository "{repo_name}": '
+                        f'"{cached_value}" -> "{current_value}". '
+                    )
+
+    def cache_config(self, config):
+        """
+        Cache the current config for validation in the next iteration.
+        Should be called at the end of each conditional setup loop iteration.
+
+        Args:
+            config: The configuration dict to cache
+        """
+        import copy
+        self.cached_config = copy.deepcopy(config)
 
 class ConditionalExpressionParser:
     """
