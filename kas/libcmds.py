@@ -848,7 +848,7 @@ class ConditionalSetupLoop(Command):
                 return False
 
             # Register conditional include for processing
-            logging.info('ConditionalSetupLoop: adding conditional include: %s',
+            logging.debug('ConditionalSetupLoop: adding conditional include: %s',
                         file_path)
             ctx.config.handler.commit_conditional_include(full_path)
             return True

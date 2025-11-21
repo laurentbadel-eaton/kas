@@ -613,8 +613,7 @@ class IncludeHandler:
         self.config_files = []
         self.conditional_definitions = []        
         self.resolved_includes = []        
-        self.conditional_processor.clear_variable_cache()        
-        self.conditional_processor.processed_conditionals.clear()
+        self.conditional_processor.clear_variable_cache()
 
     def commit_conditional_include(self, include_path):
         """
@@ -1006,7 +1005,7 @@ class ConditionalIncludeProcessor:
                 # Only mark as processed when condition is True (include is added)
                 # This ensures False conditions can be re-evaluated in next iteration
                 self.processed_conditionals.add(condition_key)
-                logging.info('ConditionalIncludeProcessor: condition "%s" evaluates to True', condition)
+                logging.debug('ConditionalIncludeProcessor: condition "%s" evaluates to True', condition)
             else:
                 # Don't mark as processed - keep for potential re-evaluation
                 # Variable values may change due to regular includes in next iteration
