@@ -95,8 +95,17 @@ class VariableResolver:
                 raise IncludeException(f'Unknown variable source: {source}')
 
         except Exception as e:
-            logging.warning('VariableResolver: failed to get %s[%s]: %s',
-                          source, name, e)
+            # Do not catch KasUserErrors
+            from .kasusererror import KasUserError
+            if isinstance(e, KasUserError):
+                raise
+                
+            # Log warnings for unexpected errors
+            if source == 'bb' and ('PATH' in str(e) or 'bitbake-getvar not found' in str(e)):
+                logging.debug('VariableResolver: BitBake variable %s not available, using config fallback', name)
+            else:
+                logging.warning('VariableResolver: failed to get %s[%s]: %s',
+                              source, name, e)
             return ''
 
     def _get_target_recipe(self) -> str | None:
@@ -153,29 +162,43 @@ class VariableResolver:
         import subprocess
         from .libkas import find_program
         from .context import get_context
+        from .kasusererror import KasUserError
+
+        ctx = get_context()
+        
+        # Check if we're in a context where BitBake environment is not available
+        # This happens during lightweight operations (dump, purge) without --enable-conditionals
+        if hasattr(ctx, 'skip') and ('setup_environ' in ctx.skip or 'write_bbconfig' in ctx.skip):
+            # Allow MACHINE and DISTRO since they may be specified in kas config
+            if name in ['MACHINE', 'DISTRO']:
+                logging.debug('VariableResolver: Using config fallback for bb[%s] in lightweight context', name)
+                return self._get_config_fallback_value(name)
+            else:
+                # Check if user has explicitly enabled conditionals
+                enable_conditionals = getattr(getattr(ctx, 'args', None), 'enable_conditionals', False)
+                if enable_conditionals:
+                    # This shouldn't happen if the flag logic is working correctly
+                    logging.warning('VariableResolver: --enable-conditionals set but BitBake environment not available')
+                else:
+                    # Warn user that they might want to use --enable-conditionals
+                    logging.warning('VariableResolver: BitBake variable bb[%s] not available in lightweight mode. '
+                                   'Use --enable-conditionals for full BitBake support.', name)
+                
+                # Fall back gracefully with a debug message
+                logging.debug('VariableResolver: BitBake variable bb[%s] not available in lightweight mode, '
+                             'returning empty value.', name)
+                return ''
 
         # Validate target configuration first
         target_recipe = self._get_target_recipe()
 
-        ctx = get_context()
         bitbake_getvar = find_program(ctx.environ['PATH'], 'bitbake-getvar')
 
         if not bitbake_getvar:
             # Fallback: check if the variable is set in the kas config
             logging.warning('VariableResolver: bitbake-getvar not found, '
                           'using config fallback')
-            if hasattr(ctx, 'config') and ctx.config:
-                config_data = ctx.config._config
-                if name == 'MACHINE':
-                    value = config_data.get('machine', '')
-                elif name == 'DISTRO':
-                    value = config_data.get('distro', '')
-                else:
-                    value = ''
-                logging.debug('VariableResolver: bb[%s] = "%s" '
-                            '(from config fallback)', name, value)
-                return value
-            return ''
+            return self._get_config_fallback_value(name)
 
         # Use bitbake-getvar with or without -r flag depending on target configuration
         if target_recipe:
@@ -197,12 +220,42 @@ class VariableResolver:
             cwd=ctx.build_dir,
             capture_output=True,
             text=True,
-            check=True
+            check=False  # Don't raise exception on non-zero return code
         )
+        
+        if result.returncode == 0:
+            value = result.stdout.strip()
+            logging.debug('VariableResolver: bb[%s] = "%s" %s', 
+                        name, value, debug_context)
+            return value
+        else:
+            # BitBake not set up yet or other error, fall back to config values
+            logging.debug('VariableResolver: bitbake-getvar failed (return code %d), using config fallback', result.returncode)
+            return self._get_config_fallback_value(name)
         value = result.stdout.strip()
         logging.debug('VariableResolver: bb[%s] = "%s" %s', 
                     name, value, debug_context)
         return value
+
+    def _get_config_fallback_value(self, name: str) -> str:
+        """
+        Get variable value from kas config as fallback when BitBake is not available.
+        """
+        from .context import get_context
+        
+        ctx = get_context()
+        if hasattr(ctx, 'config') and ctx.config:
+            config_data = ctx.config._config
+            if name == 'MACHINE':
+                value = config_data.get('machine', '')
+            elif name == 'DISTRO':
+                value = config_data.get('distro', '')
+            else:
+                value = ''
+            logging.debug('VariableResolver: bb[%s] = "%s" '
+                        '(from config fallback)', name, value)
+            return value
+        return ''
 
     def clear_cache(self):
         """
@@ -451,6 +504,23 @@ class IncludeHandler:
             for include in header.get('includes', []):
                 # Check if this is a conditional include (has 'if' key)
                 if isinstance(include, Mapping) and 'if' in include:
+                    # Check if conditionals are enabled
+                    from .context import get_context
+                    ctx = get_context()
+                    enable_conditionals = getattr(getattr(ctx, 'args', None), 'enable_conditionals', False)
+                    
+                    if not enable_conditionals:
+                        # Warn or error when conditionals are encountered without the flag
+                        include_file = include.get('file', '<unknown>')
+                        condition = include.get('if', '<unknown>')
+                        logging.warning(
+                            'Found conditional include "%s" with condition "%s", but '
+                            '--enable-conditionals flag is not set. This conditional will be ignored. '
+                            'Add --enable-conditionals flag to process conditional includes.',
+                            include_file, condition
+                        )
+                        continue
+                    
                     # Store conditional include for later processing
                     conditional_include = {
                         'include': include,
@@ -669,7 +739,8 @@ class IncludeHandler:
         # Validate target hasn't changed
         if cached_target != current_target:
             raise IncludeException(
-                f'Conditional includes cannot modify the target configuration. '
+                f'Configuration error: ' 
+                f'conditional includes cannot modify the target configuration. '
                 f'Previous target: "{cached_target}", current target: "{current_target}". '
                 f'Changing targets mid-processing is disallowed as it would '
                 f'affect variable resolution and build consistency.'
@@ -707,6 +778,7 @@ class IncludeHandler:
                     for layer_name, layer_config in cached_value.items():
                         if layer_name in current_value and current_value[layer_name] != layer_config:
                             raise IncludeException(
+                                f'Configuration error: ' 
                                 f'Conditional include cannot modify existing layer '
                                 f'"{layer_name}" in repository "{repo_name}". '
                             )
@@ -714,6 +786,7 @@ class IncludeHandler:
                     # Non-dict layers must match exactly
                     if cached_value != current_value:
                         raise IncludeException(
+                            f'Configuration error: ' 
                             f'Conditional include cannot modify layers configuration '
                             f'in repository "{repo_name}". '
                         )
@@ -721,6 +794,7 @@ class IncludeHandler:
                 # For all other keys, no modification allowed
                 if cached_value != current_value:
                     raise IncludeException(
+                        f'Configuration error: ' 
                         f'Conditional include cannot modify existing repo '
                         f'configuration "{key}" in repository "{repo_name}": '
                         f'"{cached_value}" -> "{current_value}". '
@@ -1029,6 +1103,9 @@ class ConditionalIncludeProcessor:
             return result
 
         except Exception as e:
+            if isinstance(e, KasUserError):
+                raise
+                
             logging.warning('ConditionalIncludeProcessor: error evaluating condition "%s": %s', condition, e)
             return False
 

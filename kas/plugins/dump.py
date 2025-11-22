@@ -216,13 +216,14 @@ class Dump(Checkout):
             return [(k, r) for k, r in repos
                     if r.operations_disabled and r.name]
 
-        args.skip += [
-            'setup_dir',
-            'repos_apply_patches',
-            'setup_environ',
-            'write_bbconfig',
-        ]
-
+        args.skip += ['setup_dir']
+        if not getattr(args, 'enable_conditionals', False):
+            args.skip += [
+                'repos_apply_patches',
+                'setup_environ',
+                'write_bbconfig',
+            ]
+        
         super().run(args)
         ctx = get_context()
         schema_v = LOCKFILE_VERSION_MIN if args.lock else SCHEMA_VERSION_MIN

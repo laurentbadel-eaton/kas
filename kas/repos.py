@@ -111,6 +111,7 @@ class Repo:
         self.operations_disabled = disable_operations
         self.is_fetching = False
         self.is_setup_complete = False
+        self.patches_applied = False  # Track if patches have been applied
 
         if not self.url:
             self.resolve_local()
@@ -532,7 +533,7 @@ class RepoImpl(Repo):
         """
             Applies patches to a repository asynchronously.
         """
-        if self.operations_disabled or not self._patches:
+        if self.operations_disabled or not self._patches or self.patches_applied:
             return 0
 
         if self.dirty:
@@ -613,6 +614,8 @@ class RepoImpl(Repo):
                 raise PatchApplyError('Could not commit patch changes. repo: '
                                       f'{self.name}', cmd, out, err)
 
+        # Mark patches as applied to prevent re-application in future iterations
+        self.patches_applied = True
         return 0
 
     def resolve_local(self):

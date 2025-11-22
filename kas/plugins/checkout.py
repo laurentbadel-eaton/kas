@@ -58,8 +58,8 @@ class Checkout:
         ctx = create_global_context(args)
         ctx.config = Config(ctx, args.config)
 
-        macro = Macro()
+        use_conditionals = getattr(args, 'enable_conditionals', False)
+        macro = Macro(use_common_setup=True, use_conditionals=use_conditionals)
         macro.run(ctx, args.skip)
-
-
+            
 __KAS_PLUGINS__ = [Checkout]

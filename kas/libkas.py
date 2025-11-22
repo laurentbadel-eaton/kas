@@ -643,6 +643,10 @@ def setup_parser_common_args(parser):
     parser.add_argument('--update', action='store_true',
                         help='Pull new upstream changes to the desired '
                         'branch even if it is already checked out locally')
+    parser.add_argument('-en', '--enable-conditionals', action='store_true',
+                        help='Enable full BitBake environment for conditional '
+                        'includes. This allows bb[VARIABLE] conditionals to '
+                        'work but may slow down lightweight operations like dump.')
 
 
 def setup_parser_config_arg(parser):

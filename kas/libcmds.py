@@ -57,11 +57,8 @@ class Macro:
         Contains commands and provides method to run them.
     """
 
-    def __init__(self, use_common_setup=True):
+    def __init__(self, use_common_setup=True, use_conditionals=True):
         if use_common_setup:
-            repo_loop = Loop('repo_setup_loop')
-            repo_loop.add(SetupReposStep())
-
             # setup commands are pairs of setup / cleanup commands
             self.setup_commands = [
                 (SetupDir(), None)
@@ -76,14 +73,30 @@ class Macro:
                 self.setup_commands.append((SetupSSHAgent(),
                                             CleanupSSHAgent()))
 
-            self.setup_commands += [(x, None) for x in [
-                SetupHome(),
-                ConditionalSetupLoop(),
-            ]]
+            self.setup_commands.append((SetupHome(), None))
+
+            if use_conditionals:
+                # Use ConditionalSetupLoop which handles all repo operations
+                self.setup_commands.append((ConditionalSetupLoop(), None))
+                self.commands = []
+            else:
+                # Use traditional command sequence without conditional processing
+                repo_loop = Loop('repo_setup_loop')
+                repo_loop.add(SetupReposStep())
+
+                self.commands = [
+                    InitSetupRepos(),
+                    repo_loop,
+                    FinishSetupRepos(),
+                    ReposCheckout(),
+                    ReposCheckSignatures(),
+                    ReposApplyPatches(),
+                    SetupEnviron(),
+                    WriteBBConfig(),
+                ]
         else:
             self.setup_commands = []
-
-        self.commands = []
+            self.commands = []
 
     def add(self, command):
         """
@@ -659,7 +672,10 @@ class ConditionalSetupLoop(Command):
     """
 
     def __init__(self):
+        self.iteration = 0
         self.max_iterations = None
+        self.environment_setup = False
+        self.patched_repos = set()  # Track which repos have been patched
 
     def __str__(self):
         return 'conditional_setup_loop'
@@ -671,11 +687,11 @@ class ConditionalSetupLoop(Command):
         # Check if there are any conditional includes to process
         has_conditional_includes = bool(ctx.config.handler.get_conditional_definitions())
 
-        iteration = 0
+        self.iteration = 0
 
-        while iteration < self.max_iterations:
-            iteration += 1
-            logging.debug('ConditionalSetupLoop: iteration %d', iteration)
+        while self.iteration < self.max_iterations:
+            self.iteration += 1
+            logging.debug('ConditionalSetupLoop: iteration %d', self.iteration)
 
             # Run the repo setup and config writing sequence
             self._run_setup_sequence(ctx)
@@ -702,7 +718,7 @@ class ConditionalSetupLoop(Command):
 
             # For the first iteration with conditional includes, always continue
             # to allow variable changes from regular includes to take effect
-            if iteration == 1 and has_conditional_includes:
+            if self.iteration == 1 and has_conditional_includes:
                 continue
 
             # For subsequent iterations, continue if ANY changes occurred
@@ -717,7 +733,7 @@ class ConditionalSetupLoop(Command):
                 logging.debug('ConditionalSetupLoop: conditional includes '
                             'processed, continuing iteration')
 
-        if iteration >= self.max_iterations:
+        if self.iteration >= self.max_iterations:
             raise IncludeException(
                 f'ConditionalSetupLoop: failed to converge after '
                 f'{self.max_iterations} iterations. Possible circular '
@@ -725,6 +741,11 @@ class ConditionalSetupLoop(Command):
                 f'the maximum iterations by setting the environment '
                 f'variable: KAS_CONDITIONAL_INCLUDES_MAX_ITERATIONS='
                 f'{self.max_iterations * 2}')
+
+        if not self.environment_setup:
+            raise KasUserError(
+                'ConditionalSetupLoop: environment setup failed. '
+            )
 
     def _run_setup_sequence(self, ctx):
         """
@@ -751,12 +772,20 @@ class ConditionalSetupLoop(Command):
             ReposCheckout(),
             ReposCheckSignatures(),
             ReposApplyPatches(),
-            SetupEnviron(),
-            WriteBBConfig(),
         ]
 
         for cmd in commands:
             _run_single(cmd)
+
+        if not self.environment_setup:
+            try:
+                _run_single(SetupEnviron())
+                self.environment_setup = True
+            except:
+                # Ignore errors here, as environment setup may fail
+                # if no build repos are available yet
+                pass
+        _run_single(WriteBBConfig())
 
     def _evaluate_conditional_includes(self, ctx):
         """
@@ -784,28 +813,26 @@ class ConditionalSetupLoop(Command):
         Raises:
             IncludeException: If there are errors in conditional evaluation
         """
-        try:
-            # Use the integrated conditional processing in IncludeHandler
-            includes_to_process = ctx.config.handler.process_conditional_includes()
+        # Pass cached config to IncludeHandler for validation
+        if hasattr(self, '_prev_config'):
+            ctx.config.handler.cache_config(self._prev_config)
+        
+        # Retrieve conditional includes for processing
+        includes_to_process = ctx.config.handler.process_conditional_includes()
 
-            if not includes_to_process:
-                return False
-
-            logging.debug('ConditionalSetupLoop: processing %d conditional '
-                        'includes', len(includes_to_process))
-
-            new_includes_added = False
-
-            for cond_include in includes_to_process:
-                if self._process_conditional_include(ctx, cond_include):
-                    new_includes_added = True
-
-            return new_includes_added
-
-        except Exception as e:
-            logging.warning('ConditionalSetupLoop: error evaluating '
-                          'conditional includes: %s', e)
+        if not includes_to_process:
             return False
+
+        logging.debug('ConditionalSetupLoop: processing %d conditional '
+                    'includes', len(includes_to_process))
+
+        new_includes_added = False
+
+        for cond_include in includes_to_process:
+            if self._process_conditional_include(ctx, cond_include):
+                new_includes_added = True
+
+        return new_includes_added
 
     def _process_conditional_include(self, ctx, cond_include):
         """
@@ -843,24 +870,18 @@ class ConditionalSetupLoop(Command):
                 full_path = os.path.abspath(os.path.join(repo_path, file_path))
 
             if not os.path.exists(full_path):
-                logging.warning('ConditionalSetupLoop: conditional include '
-                              'file does not exist: %s', full_path)
-                return False
+                raise IncludeException(f'ConditionalSetupLoop: Include file does not exist: {full_path}')
 
             # Register conditional include for processing
             logging.debug('ConditionalSetupLoop: adding conditional include: %s',
                         file_path)
             ctx.config.handler.commit_conditional_include(full_path)
             return True
-
         except KeyError as e:
-            logging.error('ConditionalSetupLoop: missing required field in '
-                        'conditional include: %s', e)
-            return False
-        except Exception as e:
-            logging.error('ConditionalSetupLoop: error processing conditional '
-                        'include: %s', e)
-            return False
+            raise IncludeException(
+                'ConditionalSetupLoop: missing required field '
+                'in conditional include: %s', e
+            )
 
     def _reset_for_next_iteration(self, ctx):
         """

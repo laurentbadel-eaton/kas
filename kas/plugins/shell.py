@@ -89,7 +89,8 @@ class Shell:
 
         run_handle_preserve_env_arg(ctx, os, args, SetupHome)
 
-        macro = Macro()
+        use_conditionals = getattr(args, 'enable_conditionals', False)
+        macro = Macro(use_conditionals=use_conditionals)
         macro.add(ShellCommand(args.command))
         macro.run(ctx, args.skip)
 
