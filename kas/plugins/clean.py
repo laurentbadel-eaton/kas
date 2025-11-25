@@ -204,7 +204,7 @@ class Purge(CleanAll):
         ctx.config = Config(ctx, self.config_files)
         # to read the config, we need all repos (but no build env),
         macro = Macro()
-        macro.run(ctx, skip=['repos_apply_patches', 'write_bb_config',
+        macro.run(ctx, skip=['repos_apply_patches', 'write_bbconfig',
                              'setup_environ'])
 
         for r in ctx.config.get_repos():
