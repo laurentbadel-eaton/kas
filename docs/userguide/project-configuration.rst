@@ -137,6 +137,30 @@ depth first. That means that settings in one include file are overwritten
 by settings in a latter include file and entries from the last include file can
 be overwritten by the current file.
 
+Conditional Includes
+~~~~~~~~~~~~~~~~~~~~
+
+It is possible to include configuration files conditionally based on
+environment variables. This is useful for enabling features or configurations
+based on external factors (e.g. CI environment, debug mode).
+
+.. code-block:: yaml
+
+    header:
+      version: x
+      includes:
+        - file: debug-tweaks.yml
+          if: env[DEBUG_MODE] is enabled
+        - repo: meta-custom
+          file: ci-config.yml
+          if: env[CI] is true
+
+Supported conditions:
+
+* ``env[VARIABLE] is value`` (or ``equals``)
+* ``value in env[VARIABLE]`` (or ``contains``)
+
+
 .. warning::
   The include mechanism does not support circular references with respect to
   the ``repos`` entries. By that, a (transitive) include file must not change
@@ -252,13 +276,17 @@ Configuration reference
     item: dict
       :kasschemadesc:`header.properties.includes.items.anyOf[1]`
 
-      ``repo``: string [required]
+      ``repo``: string [optional]
         :kasschemadesc:`header.properties.includes.items.anyOf[1].properties.repo`
         The repo needs to be defined in the ``repos`` dictionary as
-        ``<repo-id>``.
+        ``<repo-id>``. Required if including from another repository.
 
       ``file``: string [required]
         :kasschemadesc:`header.properties.includes.items.anyOf[1].properties.file`
+
+      ``if``: string [optional]
+        :kasschemadesc:`header.properties.includes.items.anyOf[1].properties.if`
+        Condition to evaluate before including the file.
 
 ``build_system``: string [optional]
   :kasschemadesc:`build_system`

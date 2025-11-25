@@ -39,6 +39,8 @@ from jsonschema.validators import validator_for
 
 from .kasusererror import KasUserError
 from .repos import Repo
+from .conditionals import (
+    ConditionalExpressionParser, ConditionalProcessingError)
 from . import __file_version__, __compatible_file_version__, __version__
 from . import CONFIGSCHEMA
 
@@ -274,6 +276,40 @@ class IncludeHandler:
             header = current_config.config.get('header', {})
 
             for include in header.get('includes', []):
+                # Check if this is a conditional include (has 'if' key)
+                if isinstance(include, Mapping) and 'if' in include:
+                    includefile = include.get('file', None)
+                    if includefile is None:
+                        raise IncludeException(
+                            f'"file" is not specified: {include}')
+                    condition_str = include.get('if')
+
+                    # Parse and try to evaluate
+                    try:
+                        parsed_condition = \
+                            ConditionalExpressionParser.parse_condition(
+                                condition_str)
+                        eval_result = \
+                            ConditionalExpressionParser.evaluate_condition(
+                                parsed_condition, None)
+                    except ConditionalProcessingError as e:
+                        logging.warning(
+                            'Error evaluating conditional include: %s (%s)',
+                            includefile, e)
+                        eval_result = False
+
+                    if not eval_result:
+                        logging.debug(
+                            'Skipping conditional include: %s as condition '
+                            'evaluated to False', includefile)
+                        continue
+                    logging.debug("Condition is true, continuing")
+
+                    includerepo = include.get('repo', None)
+                    if includerepo is None:
+                        # No repo specified, reformat as str
+                        include = includefile
+
                 if isinstance(include, str):
                     includefile = ''
                     if include.startswith(os.path.pathsep):

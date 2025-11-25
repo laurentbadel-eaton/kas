@@ -26,7 +26,7 @@
                         {
                             "type": "integer",
                             "minimum": 1,
-                            "maximum": 20
+                            "maximum": 21
                         }
                     ]
                 },
@@ -54,6 +54,29 @@
                                     },
                                     "file": {
                                         "description": "Path to the configuration file relative to the repository.",
+                                        "type": "string"
+                                    },
+                                    "if": {
+                                        "description": "Condition to evaluate before including the file.",
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            {
+                                "description": "Conditional inclusion of a local configuration file.",
+                                "type": "object",
+                                "required": [
+                                    "file",
+                                    "if"
+                                ],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "file": {
+                                        "description": "Path to the configuration file relative to the repository.",
+                                        "type": "string"
+                                    },
+                                    "if": {
+                                        "description": "Condition to evaluate before including the file.",
                                         "type": "string"
                                     }
                                 }
