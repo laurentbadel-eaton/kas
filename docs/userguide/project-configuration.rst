@@ -141,8 +141,9 @@ Conditional Includes
 ~~~~~~~~~~~~~~~~~~~~
 
 It is possible to include configuration files conditionally based on
-environment variables. This is useful for enabling features or configurations
-based on external factors (e.g. CI environment, debug mode).
+environment variables or BitBake variables. This is useful for enabling
+features or configurations based on external factors (e.g. CI environment,
+debug mode) or build configuration (e.g. machine, distro).
 
 .. code-block:: yaml
 
@@ -154,12 +155,20 @@ based on external factors (e.g. CI environment, debug mode).
         - repo: meta-custom
           file: ci-config.yml
           if: env[CI] is true
+        - file: imx8-tweaks.yml
+          if: bb[SOC_FAMILY] contains 'mx8'
 
 Supported conditions:
 
 * ``env[VARIABLE] is value`` (or ``equals``)
 * ``value in env[VARIABLE]`` (or ``contains``)
+* ``bb[VARIABLE] is value`` (or ``equals``)
+* ``value in bb[VARIABLE]`` (or ``contains``)
 
+.. note::
+  When using BitBake variables (``bb[...]``), kas may need to defer the
+  evaluation of the condition until the build environment is fully set up.
+  This happens automatically.
 
 .. warning::
   The include mechanism does not support circular references with respect to

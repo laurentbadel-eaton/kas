@@ -41,6 +41,7 @@ from .kasusererror import KasUserError
 from .repos import Repo
 from .conditionals import (
     ConditionalExpressionParser, ConditionalProcessingError)
+from .context import get_context
 from . import __file_version__, __compatible_file_version__, __version__
 from . import CONFIGSCHEMA
 
@@ -167,6 +168,7 @@ class IncludeHandler:
         self.top_files = top_files
         self.use_lock = use_lock
         self.config_files = []
+        self.deferred_conditions = []
 
     def get_lock_filename(self, kasfile=None):
         """
@@ -291,14 +293,19 @@ class IncludeHandler:
                                 condition_str)
                         eval_result = \
                             ConditionalExpressionParser.evaluate_condition(
-                                parsed_condition, None)
-                    except ConditionalProcessingError as e:
-                        logging.warning(
-                            'Error evaluating conditional include: %s (%s)',
-                            includefile, e)
-                        eval_result = False
+                                parsed_condition, get_context())
+                    except ConditionalProcessingError:
+                        # Could not evaluate (e.g. missing env), defer it
+                        # We store the parsed condition to avoid re-parsing
+                        self.deferred_conditions.append(parsed_condition)
+                        logging.debug(
+                            'Deferring conditional include: %s'
+                            '(condition: %s)', includefile, condition_str)
+                        eval_result = None
 
-                    if not eval_result:
+                    if eval_result is None:
+                        continue
+                    elif not eval_result:
                         logging.debug(
                             'Skipping conditional include: %s as condition '
                             'evaluated to False', includefile)
@@ -356,6 +363,7 @@ class IncludeHandler:
                         configs.extend(cfg)
                         missing_repos.extend(rep)
                     else:
+                        # Repo not available yet - add to missing repos
                         missing_repos.append(includerepo)
             logging.debug('config file %s (%s)', current_config.filename,
                           'external' if is_external else 'internal')
@@ -402,6 +410,7 @@ class IncludeHandler:
             return dest
 
         self.config_files = []
+        self.deferred_conditions = []
         missing_repos = []
         self.ensure_from_same_repo()
         for configfile in self.top_files:
@@ -423,3 +432,22 @@ class IncludeHandler:
                               for cfg in config_files])
         config['header']['version'] = header_version
         return config, missing_repos
+
+    def has_resolvable_deferred_conditions(self):
+        """
+        Check if any deferred conditions can now be resolved to True.
+
+        This is used to determine if the setup loop needs to be restarted
+        to process conditional includes that were previously deferred due
+        to missing environment (e.g. BitBake variables).
+        """
+        ctx = get_context()
+
+        for condition in self.deferred_conditions:
+            try:
+                if ConditionalExpressionParser.evaluate_condition(
+                        condition, ctx):
+                    return True
+            except ConditionalProcessingError:
+                pass
+        return False

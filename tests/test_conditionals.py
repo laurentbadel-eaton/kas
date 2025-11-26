@@ -32,9 +32,10 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
                                                 '..')))
 
-from kas.conditionals import ConditionalExpressionParser, ParseError  # noqa: E402
-from kas.includehandler import IncludeHandler  # noqa: E402
-from kas.kasusererror import KasUserError  # noqa: E402
+from kas.conditionals import (                  # noqa: E402
+    ConditionalExpressionParser, ParseError)
+from kas.includehandler import IncludeHandler   # noqa: E402
+from kas.kasusererror import KasUserError       # noqa: E402
 
 
 class TestConditionalsParser(unittest.TestCase):
@@ -96,13 +97,11 @@ class TestConditionalsParser(unittest.TestCase):
                 "env[MISSING] is something")
             self.assertFalse(cond.evaluate(None))
 
-    def test_bb_variable_error(self):
-        """Test that bb[...] raises ParseError"""
-        with self.assertRaises(ParseError) as cm:
-            ConditionalExpressionParser.parse_condition(
-                "bb[MACHINE] is qemux86-64")
-        self.assertIn("BitBake variables (bb[...]) are not supported",
-                      str(cm.exception))
+    def test_bb_variable_parsing(self):
+        """Test that bb[...] parses correctly"""
+        # Should not raise ParseError
+        ConditionalExpressionParser.parse_condition(
+            "bb[MACHINE] is qemux86-64")
 
     def test_invalid_syntax(self):
         """Test invalid syntax"""

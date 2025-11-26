@@ -101,6 +101,10 @@ class Context:
         self.config = None
         self.args = args
 
+        # State tracking
+        self.build_environ_setup = False
+        self.bbconfig_written = False
+
     def setup_initial_environ(self):
         """
             Sets the environment variables for processes that are

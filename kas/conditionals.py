@@ -22,13 +22,19 @@
 """
     This module contains the implementation of conditionals.
 """
+import re
 import os
+import logging
+import subprocess
 from .kasusererror import KasUserError
+from .libkas import find_program
 
 __all__ = [
     'ParseError',
     'ConditionalProcessingError',
+    'CriticalConditionalError',
     'ConditionalExpressionParser',
+    'BitBakeEnvironment',
 ]
 
 
@@ -48,6 +54,15 @@ class ConditionalProcessingError(KasUserError):
     """
     def __init__(self, message):
         super().__init__(f'Error during conditional processing: {message}')
+
+
+class CriticalConditionalError(KasUserError):
+    """
+    Critical error during conditional processing
+    """
+    def __init__(self, message):
+        super().__init__(
+            f'Critical error during conditional processing: {message}')
 
 
 class Operand:
@@ -98,6 +113,26 @@ class EnvironmentVariable(Variable):
         return os.environ.get(self.name, "")
 
 
+class BitBakeVariable(Variable):
+    """A BitBake variable operand."""
+    def __init__(self, name: str):
+        super().__init__('bb', name)
+
+    def resolve(self, context):
+        """Resolve BitBake variable."""
+        try:
+            val = BitBakeEnvironment.instance().get_variable(
+                self.name, context)
+            return val
+        except ConditionalProcessingError:
+            # Try to get MACHINE or DISTRO value from config
+            val = _get_config_fallback_value(self.name, context)
+            if val is not None:
+                return val
+            # If fallback fails, re-raise exception
+            raise
+
+
 class ListOperand(Operand):
     """A list operand containing other operands."""
     def __init__(self, values):
@@ -134,9 +169,11 @@ class Condition:
 class Equality(Condition):
     """Equality condition: left == right."""
     def _operator_str(self):
+        """Return the string representation of the operator."""
         return "equals"
 
     def evaluate(self, context):
+        """Evaluate equality condition."""
         left_val = self.left.resolve(context)
         right_val = self.right.resolve(context)
         return str(left_val) == str(right_val)
@@ -145,6 +182,7 @@ class Equality(Condition):
 class Inclusion(Condition):
     """Inclusion condition: left contains right."""
     def _operator_str(self):
+        """Return the string representation of the operator."""
         return "contains"
 
     def evaluate(self, context):
@@ -182,6 +220,7 @@ class ConditionalExpressionParser:
     """
 
     def __init__(self, condition_str: str):
+        """Initialize the parser with the condition string."""
         self.input = condition_str.strip()
         self.pos = 0
 
@@ -251,9 +290,7 @@ class ConditionalExpressionParser:
                 f'Expected "]" at position {self.pos}', self.input)
 
         if source == 'bb':
-            raise ParseError(
-                'BitBake variables (bb[...]) are not supported '
-                'in this version', self.input)
+            return BitBakeVariable(var_name)
         else:  # source == 'env'
             return EnvironmentVariable(var_name)
 
@@ -444,3 +481,120 @@ class ConditionalExpressionParser:
             context: VariableResolutionContext with env and bb variable access
         """
         return condition.evaluate(context)
+
+
+class BitBakeEnvironment:
+    """
+    Singleton class to manage BitBake environment variables.
+    """
+    _instance = None
+
+    def __init__(self):
+        """Initialize the BitBake environment manager."""
+        self._env = None
+
+    @classmethod
+    def instance(cls):
+        """Get the singleton instance of BitBakeEnvironment."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def get_variable(self, name, ctx):
+        """
+        Get a variable from the cached environment.
+        If cache is empty, load the environment.
+        """
+        if self._env is None:
+            self.load_environment(ctx)
+        return self._env.get(name, "")
+
+    def load_environment(self, ctx):
+        """
+        Load the BitBake environment using bitbake -e.
+        """
+        output = self._run_bitbake_e(ctx)
+        self._env = self._parse_env(output)
+
+    def reset(self):
+        """
+        Reset the cached environment.
+        """
+        self._env = None
+
+    def _run_bitbake_e(self, ctx):
+        """
+        Run bitbake -e and return its output.
+        """
+        # Check if BitBake environment is available
+        if not (ctx.build_environ_setup and ctx.bbconfig_written):
+            raise ConditionalProcessingError(
+                "BitBakeEnvironment: build environment not set up")
+
+        # Get path to bitbake command
+        bitbake_cmd = find_program(ctx.environ['PATH'], 'bitbake')
+
+        if not bitbake_cmd:
+            raise ConditionalProcessingError(
+                "BitBakeEnvironment: BitBake not found in PATH")
+
+        logging.debug('BitBakeEnvironment: running bitbake -e')
+        cmd = [bitbake_cmd, '-e']
+
+        result = subprocess.run(
+            cmd,
+            env=ctx.environ,
+            cwd=ctx.build_dir,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode == 0:
+            return result.stdout
+        else:
+            raise ConditionalProcessingError(
+                f'BitBakeEnvironment: bitbake -e failed '
+                f'(rc={result.returncode})')
+
+
+    def _parse_env(self, output):
+        """
+        Parse BitBake environment output from 'bitbake -e'.
+
+        Args:
+            output: String output from 'bitbake -e' command
+
+        Returns:
+            Dictionary mapping variable names to their values
+        """
+        env = {}
+        # Regex to match VAR="VALUE"
+        regex = re.compile(
+            r"(?P<var>[a-zA-Z0-9\-_+.${}/~:]*?)=\"(?P<value>.*)\""
+        )
+        for line in output.splitlines():
+            m = regex.match(line)
+            if m:
+                env[m.group("var")] = m.group("value")
+        return env
+
+
+def _get_config_fallback_value(name: str, ctx):
+    """
+    Get variable value from kas config as fallback.
+    """
+    if hasattr(ctx, 'config') and ctx.config:
+        try:
+            config_data = ctx.config._config
+            if name == 'MACHINE':
+                value = config_data.get('machine', None)
+            elif name == 'DISTRO':
+                value = config_data.get('distro', None)
+            else:
+                value = None
+            logging.debug(
+                '_get_config_fallback_value: bb[%s] = "%s"', name, value)
+            return value
+        except RuntimeError:
+            return None
