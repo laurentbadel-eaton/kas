@@ -283,5 +283,59 @@ class TestConditionalsIntegration(unittest.TestCase):
                 self.assertNotEqual(config.get('machine'), 'inner-machine')
 
 
+class TestBitBakeConditionals(unittest.TestCase):
+    """Unit tests for BitBake variable evaluation."""
+
+    @patch('kas.conditionals.BitBakeEnvironment.instance')
+    def test_bb_variable_resolution(self, mock_instance):
+        """Test bb[VAR] resolution via BitBakeEnvironment"""
+        mock_env = mock_instance.return_value
+        mock_env.get_variable.return_value = 'test_value'
+
+        cond = ConditionalExpressionParser.parse_condition(
+            "bb[TEST_VAR] is test_value")
+        # Context can be None as we mock get_variable
+        self.assertTrue(cond.evaluate(None))
+
+        mock_env.get_variable.assert_called_with('TEST_VAR', None)
+
+    @patch('kas.conditionals.BitBakeEnvironment.instance')
+    def test_bb_variable_fallback(self, mock_instance):
+        """Test bb[MACHINE] fallback to config"""
+        from kas.conditionals import ConditionalProcessingError
+
+        mock_env = mock_instance.return_value
+        # Simulate environment not ready
+        mock_env.get_variable.side_effect = \
+            ConditionalProcessingError("Not ready")
+
+        # Mock context with config
+        mock_ctx = unittest.mock.Mock()
+        mock_ctx.config._config = {'machine': 'qemux86-64'}
+
+        cond = ConditionalExpressionParser.parse_condition(
+            "bb[MACHINE] is qemux86-64")
+        self.assertTrue(cond.evaluate(mock_ctx))
+
+    @patch('kas.conditionals.BitBakeEnvironment.instance')
+    def test_bb_variable_deferral(self, mock_instance):
+        """Test that bb[VAR] raises error when not ready and no fallback"""
+        from kas.conditionals import ConditionalProcessingError
+
+        mock_env = mock_instance.return_value
+        mock_env.get_variable.side_effect = \
+            ConditionalProcessingError("Not ready")
+
+        # Mock context with empty config (no fallback)
+        mock_ctx = unittest.mock.Mock()
+        mock_ctx.config = None
+
+        cond = ConditionalExpressionParser.parse_condition(
+            "bb[OTHER_VAR] is value")
+
+        with self.assertRaises(ConditionalProcessingError):
+            cond.evaluate(mock_ctx)
+
+
 if __name__ == '__main__':
     unittest.main()
