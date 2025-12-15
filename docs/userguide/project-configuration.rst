@@ -164,6 +164,7 @@ Supported conditions:
 * ``value in env[VARIABLE]`` (or ``contains``)
 * ``bb[VARIABLE] is value`` (or ``equals``)
 * ``value in bb[VARIABLE]`` (or ``contains``)
+* ``not ...`` (negates the entire condition)
 
 .. note::
   When using BitBake variables (``bb[...]``), kas may need to defer the

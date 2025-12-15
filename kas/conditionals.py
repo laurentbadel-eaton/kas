@@ -205,6 +205,21 @@ class Inclusion(Condition):
             return search_value in container
 
 
+class Negation(Condition):
+    """Negation condition: not (condition)."""
+    def __init__(self, condition):
+        self.condition = condition
+
+    def evaluate(self, context):
+        return not self.condition.evaluate(context)
+
+    def __str__(self):
+        return f"not ({self.condition})"
+
+    def _operator_str(self):
+        return "not"
+
+
 class ConditionalExpressionParser:
     """
     Recursive descent parser for conditional expressions
@@ -431,6 +446,18 @@ class ConditionalExpressionParser:
 
     def parse(self):
         """Parse the complete condition expression."""
+        self.skip_whitespace()
+
+        is_negated = False
+        # Check for 'not' keyword followed by whitespace or end of string
+        if self.input[self.pos:].startswith('not'):
+            next_char_idx = self.pos + 3
+            if next_char_idx >= len(self.input) or \
+               self.input[next_char_idx] in ' \t\n\r':
+                self.pos += 3
+                is_negated = True
+                self.skip_whitespace()
+
         # Parse: operand OPERATOR operand
         left_operand = self.parse_operand()
         operator = self.parse_operator()
@@ -447,7 +474,7 @@ class ConditionalExpressionParser:
         # Determine condition type based on operator
         if operator in ['is', 'equals']:
             # Normalize 'is' to 'equals'
-            return Equality(left_operand, right_operand)
+            condition = Equality(left_operand, right_operand)
         else:  # 'in' or 'contains'
             # Normalize 'in' to 'contains' by swapping operands
             if operator == 'in':
@@ -459,7 +486,11 @@ class ConditionalExpressionParser:
                 container_operand = left_operand
                 value_operand = right_operand
 
-            return Inclusion(container_operand, value_operand)
+            condition = Inclusion(container_operand, value_operand)
+
+        if is_negated:
+            return Negation(condition)
+        return condition
 
     @staticmethod
     def parse_condition(condition_str: str):
