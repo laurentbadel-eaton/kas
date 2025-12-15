@@ -103,6 +103,39 @@ class TestConditionalsParser(unittest.TestCase):
         ConditionalExpressionParser.parse_condition(
             "bb[MACHINE] is qemux86-64")
 
+    def test_negation(self):
+        """Test negation operator (not)"""
+        with patch.dict(
+            os.environ,
+            {'TEST_VAR': 'test_value', 'TEST_LIST': 'item1 item2'}
+        ):
+            # not equals
+            cond = ConditionalExpressionParser.parse_condition(
+                "not env[TEST_VAR] is other_value")
+            self.assertTrue(cond.evaluate(None))
+
+            cond = ConditionalExpressionParser.parse_condition(
+                "not env[TEST_VAR] is test_value")
+            self.assertFalse(cond.evaluate(None))
+
+            # not contains
+            cond = ConditionalExpressionParser.parse_condition(
+                "not env[TEST_LIST] contains item3")
+            self.assertTrue(cond.evaluate(None))
+
+            cond = ConditionalExpressionParser.parse_condition(
+                "not env[TEST_LIST] contains item1")
+            self.assertFalse(cond.evaluate(None))
+
+            # not in
+            cond = ConditionalExpressionParser.parse_condition(
+                "not item3 in env[TEST_LIST]")
+            self.assertTrue(cond.evaluate(None))
+
+            cond = ConditionalExpressionParser.parse_condition(
+                "not item1 in env[TEST_LIST]")
+            self.assertFalse(cond.evaluate(None))
+
     def test_invalid_syntax(self):
         """Test invalid syntax"""
         with self.assertRaises(ParseError):
