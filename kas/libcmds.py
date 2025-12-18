@@ -41,6 +41,7 @@ from .includehandler import IncludeException
 from .kasusererror import EnvSetButNotFoundError, ArgsCombinationError
 from .keyhandler import GPGKeyHandler, SSHKeyHandler
 from .repos import RepoRefError
+from .conditionals import BitBakeEnvironment
 
 __license__ = 'MIT'
 __copyright__ = 'Copyright (c) Siemens AG, 2017-2018'
@@ -61,6 +62,19 @@ class Macro:
             repo_loop = Loop('repo_setup_loop')
             repo_loop.add(SetupReposStep())
 
+            setup_loop = Loop('setup_loop')
+            setup_loop.add([
+                InitSetupRepos(),
+                repo_loop,
+                FinishSetupRepos(),
+                ReposCheckout(),
+                ReposCheckSignatures(),
+                ReposApplyPatches(),
+                SetupEnviron(),
+                WriteBBConfig(),
+                ProcessConditionals(),
+            ])
+
             # setup commands are pairs of setup / cleanup commands
             self.setup_commands = [
                 (SetupDir(), None)
@@ -77,14 +91,7 @@ class Macro:
 
             self.setup_commands += [(x, None) for x in [
                 SetupHome(),
-                InitSetupRepos(),
-                repo_loop,
-                FinishSetupRepos(),
-                ReposCheckout(),
-                ReposCheckSignatures(),
-                ReposApplyPatches(),
-                SetupEnviron(),
-                WriteBBConfig(),
+                setup_loop,
             ]]
         else:
             self.setup_commands = []
@@ -107,7 +114,10 @@ class Macro:
             if command_name in (skip or []):
                 return False
             logging.debug('execute %s', command_name)
-            command.execute(ctx)
+            if isinstance(command, Loop):
+                command.execute(ctx, skip)
+            else:
+                command.execute(ctx)
             return True
 
         cleanup_commands = []
@@ -150,20 +160,28 @@ class Loop(Command):
         """
             Appends a command to the loop.
         """
-        self.commands.append(command)
+        self.commands.extend(
+            command if isinstance(command, list) else [command]
+        )
 
-    def execute(self, ctx):
+    def execute(self, ctx, skip=None):
         """
             Executes the loop.
+
+            Args:
+                ctx: The execution context.
+                skip: Optional list of command names to skip during execution.
         """
         loop_name = str(self)
 
         def executor(command):
             command_name = str(command)
+            if command_name in (skip or []):
+                return False
             logging.debug('Loop %s: execute %s', loop_name, command_name)
             return command.execute(ctx)
 
-        while all(executor(c) for c in self.commands):
+        while [executor(c) for c in self.commands][-1]:
             pass
 
 
@@ -316,7 +334,8 @@ class SetupHome(Command):
             config.add_value(section, 'insteadOf',
                              f'ssh://git@{ci_ssh_host}/')
             config.add_value(section, 'insteadOf',
-                             f'ssh://git@{ci_ssh_host}:{ci_ssh_port}/')
+                             f'ssh://git@{ci_ssh_host}:'
+                             f'{ci_ssh_port}/')
 
     def _setup_gitconfig(self):
         gitconfig_host = self._path_from_env('GITCONFIG_FILE')
@@ -424,7 +443,10 @@ class SetupEnviron(Command):
         return 'setup_environ'
 
     def execute(self, ctx):
-        ctx.environ.update(get_build_environ(ctx.config.get_build_system()))
+        if not ctx.build_environ_setup:
+            ctx.environ.update(
+                get_build_environ(ctx.config.get_build_system()))
+            ctx.build_environ_setup = True
 
 
 class WriteBBConfig(Command):
@@ -436,6 +458,21 @@ class WriteBBConfig(Command):
         return 'write_bbconfig'
 
     def execute(self, ctx):
+        def _write_if_changed(filename, content):
+            """
+                Writes content to filename only if it differs from
+                existing content.
+                Returns True if file was written, False otherwise.
+            """
+            if os.path.exists(filename):
+                with open(filename, 'r') as fds:
+                    if fds.read() == content:
+                        return False
+
+            with open(filename, 'w') as fds:
+                fds.write(content)
+            return True
+
         def _get_layer_path_under_topdir(ctx, layer):
             """
                 Returns a path relative to ${TOPDIR}.
@@ -450,29 +487,43 @@ class WriteBBConfig(Command):
             filename = ctx.build_dir + '/conf/bblayers.conf'
             if not os.path.isdir(os.path.dirname(filename)):
                 os.makedirs(os.path.dirname(filename))
-            with open(filename, 'w') as fds:
-                fds.write(ctx.config.get_bblayers_conf_header())
-                fds.write('BBLAYERS ?= " \\\n    ')
-                fds.write(' \\\n    '.join(
-                          [_get_layer_path_under_topdir(ctx, layer)
-                           for repo in sorted(ctx.config.get_repos(),
-                                              key=lambda r: r.name)
-                           for layer in sorted(repo.layers)]))
-                fds.write('"\n')
-                fds.write('BBPATH ?= "${TOPDIR}"\n')
-                fds.write('BBFILES ??= ""\n')
+
+            content = ctx.config.get_bblayers_conf_header()
+            content += 'BBLAYERS ?= " \\\n    '
+            content += ' \\\n    '.join(
+                [_get_layer_path_under_topdir(ctx, layer)
+                 for repo in sorted(ctx.config.get_repos(),
+                                    key=lambda r: r.name)
+                 for layer in sorted(repo.layers)])
+            content += '"\n'
+            content += 'BBPATH ?= "${TOPDIR}"\n'
+            content += 'BBFILES ??= ""\n'
+
+            return _write_if_changed(filename, content)
 
         def _write_local_conf(ctx):
             filename = ctx.build_dir + '/conf/local.conf'
-            with open(filename, 'w') as fds:
-                fds.write(ctx.config.get_local_conf_header())
-                fds.write(f'MACHINE ??= "{ctx.config.get_machine()}"\n')
-                fds.write(f'DISTRO ??= "{ctx.config.get_distro()}"\n')
-                fds.write('BBMULTICONFIG ?= '
-                          f'"{ctx.config.get_multiconfig()}"\n')
 
-        _write_bblayers_conf(ctx)
-        _write_local_conf(ctx)
+            content = ctx.config.get_local_conf_header()
+            content += f'MACHINE ??= "{ctx.config.get_machine()}"\n'
+            content += f'DISTRO ??= "{ctx.config.get_distro()}"\n'
+            content += 'BBMULTICONFIG ?= ' \
+                       f'"{ctx.config.get_multiconfig()}"\n'
+
+            return _write_if_changed(filename, content)
+
+        bblayers_changed = _write_bblayers_conf(ctx)
+        local_changed = _write_local_conf(ctx)
+
+        # If configuration changed, reset the BitBake environment cache
+        # to ensure subsequent conditional evaluations use the new config
+        if bblayers_changed or local_changed:
+            logging.debug(
+                "BitBake configuration changed, resetting environment cache")
+            BitBakeEnvironment.instance().reset()
+
+        # Mark that BB config has been written
+        ctx.bbconfig_written = True
 
 
 class ReposApplyPatches(Command):
@@ -652,3 +703,53 @@ class ReposCheckSignatures(Command):
 
             raise RepoRefError(f'Repository {repo.name} is not signed '
                                'with a trusted key.')
+
+
+class ProcessConditionals(Command):
+    """
+        Process conditionals in the configuration.
+
+        Return True if conditionals require processing new config
+        files in a new iteration, and False otherwise to stop the
+        setup process.
+    """
+
+    def __str__(self):
+        return 'process_conditionals'
+
+    def execute(self, ctx):
+        logging.debug("Processing conditionals")
+
+        # Ensure BitBake prerequisites are met before processing conditionals
+        self._ensure_bb_prerequisites(ctx)
+
+        # Check if any deferred conditionals can now be resolved
+        if hasattr(ctx.config, 'handler') and ctx.config.handler:
+            if ctx.config.handler.has_resolvable_deferred_conditions():
+                logging.info(
+                    "Found resolvable conditional includes, "
+                    "triggering new setup iteration")
+                return True
+
+        # No more conditionals to process or none resolved to True
+        logging.debug("No new conditional includes to process")
+        return False
+
+    def _ensure_bb_prerequisites(self, ctx):
+        """
+        Ensure that BitBake environment setup and configuration writing
+        have been completed before processing conditionals that may
+        depend on BitBake variables.
+        """
+        # Check if build environment setup is needed
+        if not ctx.build_environ_setup:
+            logging.debug(
+                "Build environment not yet set up, running SetupEnviron")
+            setup_environ_cmd = SetupEnviron()
+            setup_environ_cmd.execute(ctx)
+
+        # Check if BB config writing is needed
+        if not ctx.bbconfig_written:
+            logging.debug("BB config not yet written, running WriteBBConfig")
+            write_bbconfig_cmd = WriteBBConfig()
+            write_bbconfig_cmd.execute(ctx)

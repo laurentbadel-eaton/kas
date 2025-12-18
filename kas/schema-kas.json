@@ -26,7 +26,7 @@
                         {
                             "type": "integer",
                             "minimum": 1,
-                            "maximum": 20
+                            "maximum": 21
                         }
                     ]
                 },
@@ -54,6 +54,49 @@
                                     },
                                     "file": {
                                         "description": "Path to the configuration file relative to the repository.",
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            {
+                                "description": "Conditional include that is only processed if the condition evaluates to true.",
+                                "type": "object",
+                                "required": [
+                                    "file",
+                                    "if"
+                                ],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "file": {
+                                        "description": "Path to the configuration file relative to the repository root.",
+                                        "type": "string"
+                                    },
+                                    "if": {
+                                        "description": "Condition that must evaluate to true for the file to be included. Supports bb[VAR] for BitBake variables and env[VAR] for environment variables.",
+                                        "type": "string"
+                                    }
+                                }
+                            },
+                            {
+                                "description": "Conditional include from another repository that is only processed if the condition evaluates to true.",
+                                "type": "object",
+                                "required": [
+                                    "repo",
+                                    "file",
+                                    "if"
+                                ],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "repo": {
+                                        "description": "Repository ``key`` the configuration file is located in.",
+                                        "type": "string"
+                                    },
+                                    "file": {
+                                        "description": "Path to the configuration file relative to the repository.",
+                                        "type": "string"
+                                    },
+                                    "if": {
+                                        "description": "Condition that must evaluate to true for the file to be included. Supports bb[VAR] for BitBake variables and env[VAR] for environment variables.",
                                         "type": "string"
                                     }
                                 }

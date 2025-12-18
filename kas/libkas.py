@@ -627,9 +627,12 @@ def ssh_no_host_key_check():
 
 
 def setup_parser_common_args(parser):
-    from kas.libcmds import Macro
+    from kas.libcmds import Macro, Loop
 
-    setup_cmds = [str(s) for (s, _) in Macro().setup_commands]
+    setup_cmds = sum([
+        [str(u) for u in s.commands] if isinstance(s, Loop) else [str(s)]
+        for (s, _) in Macro().setup_commands], []
+    )
     parser.add_argument('--skip',
                         help='Skip build steps. To skip more than one step, '
                         'use this argument multiple times.',
